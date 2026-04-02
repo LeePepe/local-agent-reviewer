@@ -1,4 +1,4 @@
-# codex-pr-reviewer
+# local-agent-reviewer
 
 AI-powered pull request code review using Codex CLI and GitHub Actions.
 
@@ -48,7 +48,7 @@ permissions:
 
 jobs:
   code-review:
-    uses: LeePepe/codex-pr-reviewer/.github/workflows/review.yml@v1
+    uses: LeePepe/local-agent-reviewer/.github/workflows/review.yml@v1
     with:
       file_pattern: '*.swift'          # adjust for your language
       topics: 'code-quality,performance,security'
@@ -71,7 +71,7 @@ PR opened / updated
        ↓
 caller workflow (.github/workflows/code-review.yml)
        ↓
-uses: LeePepe/codex-pr-reviewer/.github/workflows/review.yml@v1
+uses: LeePepe/local-agent-reviewer/.github/workflows/review.yml@v1
        ↓
 setup job: topics string → JSON matrix
        ↓
