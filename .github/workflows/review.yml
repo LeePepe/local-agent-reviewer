@@ -1,0 +1,110 @@
+name: AI PR Code Review
+
+on:
+  workflow_call:
+    inputs:
+      file_pattern:
+        description: 'Glob pattern for files to review (e.g. *.swift, **/*.ts)'
+        type: string
+        default: '*.swift'
+      topics:
+        description: 'Comma-separated review topics: code-quality,performance,security'
+        type: string
+        default: 'code-quality,performance,security'
+      cli_path:
+        description: 'Path to the Codex CLI binary'
+        type: string
+        default: '~/.superset/bin/codex'
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  setup:
+    runs-on: [self-hosted, macOS, arm64]
+    outputs:
+      matrix: ${{ steps.build-matrix.outputs.matrix }}
+    steps:
+      - name: Build topic matrix
+        id: build-matrix
+        run: |
+          TOPICS="${{ inputs.topics }}"
+          JSON=$(echo "$TOPICS" | tr ',' '\n' | jq -R . | jq -sc '{topic: .}')
+          echo "matrix=$JSON" >> "$GITHUB_OUTPUT"
+
+  review:
+    needs: setup
+    name: "Review: ${{ matrix.topic }}"
+    runs-on: [self-hosted, macOS, arm64]
+    strategy:
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get diff
+        id: diff
+        run: |
+          PATTERN="${{ inputs.file_pattern }}"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            DIFF=$(git diff ${{ github.event.pull_request.base.sha }}..HEAD -- "$PATTERN")
+          else
+            DIFF=$(git diff HEAD~1 -- "$PATTERN" 2>/dev/null || echo "")
+          fi
+          if [ -z "$DIFF" ]; then
+            echo "empty=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "empty=false" >> "$GITHUB_OUTPUT"
+            echo "$DIFF" > changes.diff
+          fi
+
+      - name: Build prompt
+        id: prompt
+        if: steps.diff.outputs.empty == 'false'
+        run: |
+          TOPIC="${{ matrix.topic }}"
+          PATTERN="${{ inputs.file_pattern }}"
+          case "$TOPIC" in
+            code-quality)
+              PROMPT="Review the following $PATTERN code diff for code quality issues: naming conventions, code duplication, complexity, readability, framework best practices. Output a concise markdown report with findings grouped as CRITICAL, HIGH, MEDIUM, LOW. If no issues, say PASS."
+              ;;
+            performance)
+              PROMPT="Review the following $PATTERN code diff for performance issues: unnecessary recomputation, memory leaks, excessive view updates, inefficient algorithms, async/await misuse. Output a concise markdown report with findings grouped as CRITICAL, HIGH, MEDIUM, LOW. If no issues, say PASS."
+              ;;
+            security)
+              PROMPT="Review the following $PATTERN code diff for security issues: hardcoded secrets, insecure data storage, improper input validation, unsafe API usage, privacy violations. Output a concise markdown report with findings grouped as CRITICAL, HIGH, MEDIUM, LOW. If no issues, say PASS."
+              ;;
+            *)
+              PROMPT="Review the following $PATTERN code diff for $TOPIC issues. Output a concise markdown report with findings grouped as CRITICAL, HIGH, MEDIUM, LOW. If no issues, say PASS."
+              ;;
+          esac
+          printf '%s\n\n' "$PROMPT" > prompt.txt
+          cat changes.diff >> prompt.txt
+
+      - name: Run Codex review
+        if: steps.diff.outputs.empty == 'false'
+        run: |
+          "${{ inputs.cli_path }}" -p "$(cat prompt.txt)" --yolo 2>&1 | tee review-output.txt
+
+      - name: No changes detected
+        if: steps.diff.outputs.empty == 'true'
+        run: echo "No changes detected for pattern ${{ inputs.file_pattern }}." > review-output.txt
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TOPIC="${{ matrix.topic }}"
+          LABEL=$(echo "$TOPIC" | sed 's/-/ /g' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2))}1')
+          {
+            echo "## Code Review: $LABEL"
+            echo ""
+            cat review-output.txt
+          } > comment-body.txt
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --body-file comment-body.txt \
+            --repo ${{ github.repository }}
